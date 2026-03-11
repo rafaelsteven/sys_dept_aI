@@ -44,6 +44,11 @@ cd Backend
 # Crear entorno virtual
 python -m venv venv
 
+# instalar
+sudo apt install python3
+sudo apt install python3.12-venv
+sudo apt install python3-pip
+
 # Activar entorno virtual
 # Linux / macOS:
 source venv/bin/activate
