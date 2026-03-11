@@ -6,7 +6,7 @@ import uuid
 from core.configuracion import configuracion
 from models.agente import RolAgente, EstadoAgente
 from models.mensaje import CanalComunicacion, EtiquetaMensaje
-from models.proyecto import EstadoProyecto
+from models.proyecto import EstadoProyecto, EstadoCommit
 
 
 motor = create_async_engine(
@@ -39,6 +39,8 @@ class ProyectoTabla(Base):
     texto_pdf = Column(Text, nullable=True)
     archivos_pdf = Column(JSON, default=list)
     archivos_imagen = Column(JSON, default=list)
+    url_repositorio = Column(String(500), nullable=True)
+    rama_desarrollo = Column(String(100), nullable=True)
 
 
 class AgenteTabla(Base):
@@ -65,6 +67,20 @@ class MensajeTabla(Base):
     contenido = Column(Text, nullable=False)
     marca_tiempo = Column(DateTime, default=datetime.utcnow)
     es_typing = Column(Boolean, default=False)
+
+
+class CommitPendienteTabla(Base):
+    __tablename__ = "commits_pendientes"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    proyecto_id = Column(String, nullable=False)
+    descripcion = Column(Text, nullable=False)
+    archivos = Column(JSON, nullable=False)   # list[{ruta, contenido}]
+    estado = Column(SAEnum(EstadoCommit), default=EstadoCommit.PENDIENTE)
+    revision_qa = Column(Text, nullable=True)
+    revision_lider = Column(Text, nullable=True)
+    hash_commit = Column(String(100), nullable=True)
+    fecha_creacion = Column(DateTime, default=datetime.utcnow)
 
 
 async def crear_tablas():

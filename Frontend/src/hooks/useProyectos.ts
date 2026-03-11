@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { CONFIG } from '../configuracion/api'
-import type { Proyecto } from '../types/Proyecto'
+import type { Proyecto, ArchivoCommit } from '../types/Proyecto'
 
 const mapearProyecto = (datos: Record<string, unknown>): Proyecto => ({
   id: datos.id as string,
@@ -12,6 +12,8 @@ const mapearProyecto = (datos: Record<string, unknown>): Proyecto => ({
   textoPdf: datos.texto_pdf as string | undefined,
   archivosPdf: (datos.archivos_pdf as string[]) ?? [],
   archivosImagen: (datos.archivos_imagen as string[]) ?? [],
+  urlRepositorio: datos.url_repositorio as string | undefined,
+  ramaDesarrollo: datos.rama_desarrollo as string | undefined,
 })
 
 const obtenerProyectos = async (): Promise<Proyecto[]> => {
@@ -59,6 +61,23 @@ export function useCrearProyecto() {
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['proyectos'] })
+    },
+  })
+}
+
+export function useEnviarCodigo(proyectoId: string) {
+  return useMutation({
+    mutationFn: async (datos: { descripcion: string; archivos: ArchivoCommit[] }) => {
+      const res = await fetch(`${CONFIG.urlApi}/api/proyectos/${proyectoId}/codigo`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(datos),
+      })
+      if (!res.ok) {
+        const error = await res.json()
+        throw new Error((error.detail as string) ?? 'Error enviando código')
+      }
+      return res.json()
     },
   })
 }

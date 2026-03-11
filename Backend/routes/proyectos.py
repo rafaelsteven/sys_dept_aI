@@ -10,9 +10,10 @@ from core.configuracion import configuracion
 from core.errores import ProyectoNoEncontrado, LimiteArchivoExcedido, ExtensionNoPermitida
 from core.orquestador import orquestador
 from db.base_datos import obtener_session
-from db.repositorio import RepositorioProyecto, RepositorioMensaje
+from db.repositorio import RepositorioProyecto, RepositorioMensaje, RepositorioCommitPendiente
 from models.mensaje import CanalComunicacion
-from models.proyecto import Proyecto, DatosNuevoProyecto, EstadoProyecto
+from models.proyecto import Proyecto, DatosNuevoProyecto, EstadoProyecto, ArchivoCommit
+from servicios import gestor_repositorio
 
 router = APIRouter(prefix="/api/proyectos", tags=["proyectos"])
 
@@ -68,6 +69,7 @@ async def crear_proyecto(
     nombre: str = Form(...),
     descripcion: str = Form(...),
     prompt_inicial: str = Form(...),
+    url_repositorio: str | None = Form(default=None),
     pdfs: list[UploadFile] = File(default=[]),
     imagenes: list[UploadFile] = File(default=[]),
     session: AsyncSession = Depends(obtener_session),
@@ -113,6 +115,9 @@ async def crear_proyecto(
         except (ExtensionNoPermitida, LimiteArchivoExcedido) as e:
             raise HTTPException(status_code=400, detail=str(e))
 
+    # Determinar rama de desarrollo
+    rama = configuracion.rama_desarrollo_default if url_repositorio else None
+
     # Crear proyecto
     proyecto = Proyecto(
         id=proyecto_id,
@@ -124,15 +129,44 @@ async def crear_proyecto(
         texto_pdf=texto_pdf_total.strip() or None,
         archivos_pdf=archivos_pdf,
         archivos_imagen=archivos_imagen,
+        url_repositorio=url_repositorio.strip() if url_repositorio else None,
+        rama_desarrollo=rama,
     )
 
     repo = RepositorioProyecto(session)
     await repo.guardar(proyecto)
 
+    # Clonar repositorio en background si se proporcionó URL
+    if url_repositorio:
+        import asyncio
+        asyncio.create_task(
+            _clonar_repositorio_background(proyecto_id, url_repositorio.strip(), rama)
+        )
+
     # Lanzar análisis inicial en background
     await orquestador.iniciar_proyecto(proyecto)
 
     return {"proyecto": proyecto, "mensaje": "Proyecto creado. Iniciando análisis del equipo..."}
+
+
+async def _clonar_repositorio_background(
+    proyecto_id: str, url: str, rama: str
+) -> None:
+    """Clona el repositorio y notifica por WebSocket."""
+    from core.bus_mensajes import bus_mensajes
+    try:
+        await bus_mensajes.publicar_sistema(
+            proyecto_id, f"Clonando repositorio {url}..."
+        )
+        await gestor_repositorio.clonar_repositorio(url, proyecto_id, rama)
+        await bus_mensajes.publicar_sistema(
+            proyecto_id,
+            f"Repositorio clonado. Rama de desarrollo: `{rama}`",
+        )
+    except Exception as e:
+        await bus_mensajes.publicar_sistema(
+            proyecto_id, f"Error al clonar repositorio: {e}"
+        )
 
 
 @router.get("/")
@@ -194,3 +228,52 @@ async def obtener_mensajes(
     repo = RepositorioMensaje(session)
     mensajes = await repo.listar_por_proyecto(proyecto_id, limite=limite, canal=canal)
     return {"mensajes": mensajes}
+
+
+from pydantic import BaseModel as _BaseModel
+
+
+class DatosCodigo(_BaseModel):
+    descripcion: str
+    archivos: list[ArchivoCommit]
+
+
+@router.post("/{proyecto_id}/codigo", status_code=status.HTTP_202_ACCEPTED)
+async def enviar_codigo_para_revision(
+    proyecto_id: str,
+    datos: DatosCodigo,
+    session: AsyncSession = Depends(obtener_session),
+):
+    """
+    Envía código para el flujo de revisión: QA → Líder → commit+push.
+    Retorna inmediatamente; el flujo ocurre en background vía WebSocket.
+    """
+    repo = RepositorioProyecto(session)
+    try:
+        await repo.obtener_por_id(proyecto_id)
+    except ProyectoNoEncontrado:
+        raise HTTPException(status_code=404, detail="Proyecto no encontrado")
+
+    if not datos.archivos:
+        raise HTTPException(status_code=400, detail="Debes enviar al menos un archivo")
+
+    commit_id = await orquestador.revisar_y_commitear(
+        proyecto_id=proyecto_id,
+        descripcion=datos.descripcion,
+        archivos=datos.archivos,
+    )
+    return {
+        "commit_id": commit_id,
+        "mensaje": "Código enviado a revisión. QA y el Líder lo revisarán por WebSocket.",
+    }
+
+
+@router.get("/{proyecto_id}/commits")
+async def listar_commits(
+    proyecto_id: str,
+    session: AsyncSession = Depends(obtener_session),
+):
+    """Lista todos los commits pendientes y su estado de aprobación."""
+    repo = RepositorioCommitPendiente(session)
+    commits = await repo.listar_por_proyecto(proyecto_id)
+    return {"commits": commits}

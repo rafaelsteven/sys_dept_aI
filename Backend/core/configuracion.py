@@ -30,6 +30,11 @@ class Configuracion(BaseSettings):
     max_reintentos_agente: int = 2
     segundos_espera_reintento: int = 3
 
+    # Repositorio Git
+    rama_desarrollo_default: str = "dev"
+    git_autor_nombre: str = "SysDept AI"
+    git_autor_email: str = "sysdept@ai.local"
+
     class Config:
         env_file = ".env"
 

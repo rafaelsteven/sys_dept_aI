@@ -3,8 +3,8 @@ from sqlalchemy import select, delete
 from datetime import datetime
 import uuid
 
-from db.base_datos import ProyectoTabla, AgenteTabla, MensajeTabla
-from models.proyecto import Proyecto, EstadoProyecto
+from db.base_datos import ProyectoTabla, AgenteTabla, MensajeTabla, CommitPendienteTabla
+from models.proyecto import Proyecto, EstadoProyecto, CommitPendiente, EstadoCommit, ArchivoCommit
 from models.agente import Agente, RolAgente, EstadoAgente
 from models.mensaje import Mensaje, CanalComunicacion, EtiquetaMensaje
 from core.errores import ProyectoNoEncontrado
@@ -25,6 +25,8 @@ class RepositorioProyecto:
             texto_pdf=proyecto.texto_pdf,
             archivos_pdf=proyecto.archivos_pdf,
             archivos_imagen=proyecto.archivos_imagen,
+            url_repositorio=proyecto.url_repositorio,
+            rama_desarrollo=proyecto.rama_desarrollo,
         )
         self._session.add(fila)
         await self._session.commit()
@@ -69,6 +71,70 @@ class RepositorioProyecto:
             texto_pdf=fila.texto_pdf,
             archivos_pdf=fila.archivos_pdf or [],
             archivos_imagen=fila.archivos_imagen or [],
+            url_repositorio=fila.url_repositorio,
+            rama_desarrollo=fila.rama_desarrollo,
+        )
+
+
+class RepositorioCommitPendiente:
+    def __init__(self, session: AsyncSession):
+        self._session = session
+
+    async def guardar(self, commit: CommitPendiente) -> CommitPendiente:
+        fila = CommitPendienteTabla(
+            id=commit.id,
+            proyecto_id=commit.proyecto_id,
+            descripcion=commit.descripcion,
+            archivos=[a.model_dump() for a in commit.archivos],
+            estado=commit.estado,
+            revision_qa=commit.revision_qa,
+            revision_lider=commit.revision_lider,
+            hash_commit=commit.hash_commit,
+            fecha_creacion=commit.fecha_creacion,
+        )
+        self._session.add(fila)
+        await self._session.commit()
+        return commit
+
+    async def actualizar_estado(
+        self,
+        commit_id: str,
+        estado: EstadoCommit,
+        revision_qa: str | None = None,
+        revision_lider: str | None = None,
+        hash_commit: str | None = None,
+    ) -> None:
+        fila = await self._session.get(CommitPendienteTabla, commit_id)
+        if not fila:
+            return
+        fila.estado = estado
+        if revision_qa is not None:
+            fila.revision_qa = revision_qa
+        if revision_lider is not None:
+            fila.revision_lider = revision_lider
+        if hash_commit is not None:
+            fila.hash_commit = hash_commit
+        await self._session.commit()
+
+    async def listar_por_proyecto(self, proyecto_id: str) -> list[CommitPendiente]:
+        resultado = await self._session.execute(
+            select(CommitPendienteTabla)
+            .where(CommitPendienteTabla.proyecto_id == proyecto_id)
+            .order_by(CommitPendienteTabla.fecha_creacion.desc())
+        )
+        return [self._mapear(f) for f in resultado.scalars().all()]
+
+    def _mapear(self, fila: CommitPendienteTabla) -> CommitPendiente:
+        return CommitPendiente(
+            id=fila.id,
+            proyecto_id=fila.proyecto_id,
+            descripcion=fila.descripcion,
+            archivos=[ArchivoCommit(**a) for a in (fila.archivos or [])],
+            estado=fila.estado,
+            revision_qa=fila.revision_qa,
+            revision_lider=fila.revision_lider,
+            hash_commit=fila.hash_commit,
+            fecha_creacion=fila.fecha_creacion,
         )
 
 

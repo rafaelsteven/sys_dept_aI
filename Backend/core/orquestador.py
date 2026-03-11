@@ -18,10 +18,11 @@ from core.bus_mensajes import bus_mensajes
 from core.configuracion import configuracion
 from core.errores import ProyectoNoEncontrado
 from db.base_datos import FabricaSession
-from db.repositorio import RepositorioMensaje, RepositorioAgente, RepositorioProyecto
+from db.repositorio import RepositorioMensaje, RepositorioAgente, RepositorioProyecto, RepositorioCommitPendiente
 from models.agente import RolAgente, EstadoAgente, Agente
 from models.mensaje import CanalComunicacion, EtiquetaMensaje, Mensaje
-from models.proyecto import Proyecto, EstadoProyecto
+from models.proyecto import Proyecto, EstadoProyecto, CommitPendiente, EstadoCommit, ArchivoCommit
+from servicios import gestor_repositorio
 
 
 # Keywords para encadenar agentes automáticamente
@@ -329,6 +330,222 @@ Dirígete directamente a él/ella por nombre.
         if proyecto.archivos_imagen:
             partes.append(f"IMÁGENES ADJUNTAS: {', '.join(proyecto.archivos_imagen)}")
         return "\n\n".join(partes)
+
+    async def revisar_y_commitear(
+        self,
+        proyecto_id: str,
+        descripcion: str,
+        archivos: list[ArchivoCommit],
+    ) -> str:
+        """
+        Flujo completo de revisión y commit:
+        1. QA revisa el código propuesto
+        2. Si QA aprueba → Líder da el visto bueno final
+        3. Si Líder aprueba → commit + push a la rama dev
+
+        Retorna el ID del CommitPendiente creado.
+        """
+        commit_id = str(uuid.uuid4())
+
+        # Persistir el commit pendiente
+        commit = CommitPendiente(
+            id=commit_id,
+            proyecto_id=proyecto_id,
+            descripcion=descripcion,
+            archivos=archivos,
+            estado=EstadoCommit.PENDIENTE,
+            fecha_creacion=datetime.utcnow(),
+        )
+        async with FabricaSession() as session:
+            repo_commit = RepositorioCommitPendiente(session)
+            await repo_commit.guardar(commit)
+
+        asyncio.create_task(self._ejecutar_flujo_commit(commit))
+        return commit_id
+
+    async def _ejecutar_flujo_commit(self, commit: CommitPendiente) -> None:
+        """Orquesta el flujo QA → Líder → git commit+push."""
+        proyecto_id = commit.proyecto_id
+        equipo = self._equipos.get(proyecto_id, {})
+
+        qa = equipo.get(RolAgente.QA.value)
+        lider = equipo.get(RolAgente.LIDER.value)
+
+        # Construir resumen del código para los agentes
+        resumen_archivos = "\n".join(
+            f"### {a.ruta}\n```\n{a.contenido[:800]}\n```" for a in commit.archivos
+        )
+        descripcion_commit = commit.descripcion
+
+        # ── Paso 1: Revisión QA ──────────────────────────────────────────────
+        await bus_mensajes.publicar_sistema(
+            proyecto_id,
+            f"[COMMIT #{commit.id[:8]}] QA iniciando revisión de código...",
+        )
+
+        async with FabricaSession() as session:
+            await RepositorioCommitPendiente(session).actualizar_estado(
+                commit.id, EstadoCommit.EN_REVISION_QA
+            )
+
+        if not qa:
+            # Sin QA en el equipo, el Líder revisa directamente
+            revision_qa = "Sin agente QA en el equipo. El Líder revisará directamente."
+            aprobado_qa = True
+        else:
+            prompt_qa = f"""
+Se propone el siguiente commit al repositorio del proyecto.
+
+DESCRIPCIÓN: {descripcion_commit}
+
+ARCHIVOS MODIFICADOS:
+{resumen_archivos}
+
+Revisa el código como QA:
+- ¿Hay bugs evidentes o riesgos de calidad?
+- ¿El código sigue los estándares del proyecto?
+- ¿Faltan casos de prueba importantes?
+
+Termina tu revisión con una línea: "APROBADO" o "RECHAZADO" seguido del motivo.
+"""
+            await bus_mensajes.publicar_typing(proyecto_id, RolAgente.QA.value, CanalComunicacion.QA, True)
+            try:
+                revision_qa = await qa.pensar(prompt_qa)
+            except Exception as e:
+                revision_qa = f"Error en revisión QA: {e}"
+            await bus_mensajes.publicar_typing(proyecto_id, RolAgente.QA.value, CanalComunicacion.QA, False)
+
+            aprobado_qa = "APROBADO" in revision_qa.upper()
+
+            mensaje_qa = qa.construir_mensaje(
+                proyecto_id=proyecto_id,
+                contenido=f"**Revisión de commit `{commit.id[:8]}`**\n\n{revision_qa}",
+                canal=CanalComunicacion.QA,
+                agente_destino=RolAgente.LIDER.value,
+                etiqueta=EtiquetaMensaje.APROBACION if aprobado_qa else EtiquetaMensaje.BUG,
+            )
+            await self._guardar_y_publicar(mensaje_qa)
+
+        nuevo_estado_qa = EstadoCommit.APROBADO_QA if aprobado_qa else EstadoCommit.RECHAZADO_QA
+        async with FabricaSession() as session:
+            await RepositorioCommitPendiente(session).actualizar_estado(
+                commit.id, nuevo_estado_qa, revision_qa=revision_qa
+            )
+
+        if not aprobado_qa:
+            await bus_mensajes.publicar_sistema(
+                proyecto_id,
+                f"[COMMIT #{commit.id[:8]}] Rechazado por QA. No se hará commit.",
+            )
+            return
+
+        # ── Paso 2: Aprobación del Líder ─────────────────────────────────────
+        await bus_mensajes.publicar_sistema(
+            proyecto_id,
+            f"[COMMIT #{commit.id[:8]}] QA aprobó. Esperando visto bueno del Líder...",
+        )
+
+        if not lider:
+            revision_lider = "Sin Líder en el equipo. Aprobación automática."
+            aprobado_lider = True
+        else:
+            prompt_lider = f"""
+El QA ha aprobado el siguiente commit. Necesito tu aprobación final como Líder.
+
+DESCRIPCIÓN: {descripcion_commit}
+
+REVISIÓN QA:
+{revision_qa}
+
+ARCHIVOS:
+{resumen_archivos}
+
+¿Apruebas este commit para hacer push a la rama de desarrollo?
+Responde con "APROBADO" o "RECHAZADO" y tu razonamiento.
+"""
+            await bus_mensajes.publicar_typing(proyecto_id, RolAgente.LIDER.value, CanalComunicacion.GENERAL, True)
+            try:
+                revision_lider = await lider.pensar(prompt_lider)
+            except Exception as e:
+                revision_lider = f"Error en revisión del Líder: {e}"
+            await bus_mensajes.publicar_typing(proyecto_id, RolAgente.LIDER.value, CanalComunicacion.GENERAL, False)
+
+            aprobado_lider = "APROBADO" in revision_lider.upper()
+
+            mensaje_lider = lider.construir_mensaje(
+                proyecto_id=proyecto_id,
+                contenido=f"**Decisión sobre commit `{commit.id[:8]}`**\n\n{revision_lider}",
+                canal=CanalComunicacion.GENERAL,
+                agente_destino="todos",
+                etiqueta=EtiquetaMensaje.APROBACION if aprobado_lider else EtiquetaMensaje.OK,
+            )
+            await self._guardar_y_publicar(mensaje_lider)
+
+        nuevo_estado_lider = EstadoCommit.APROBADO_LIDER if aprobado_lider else EstadoCommit.RECHAZADO_LIDER
+        async with FabricaSession() as session:
+            await RepositorioCommitPendiente(session).actualizar_estado(
+                commit.id, nuevo_estado_lider, revision_lider=revision_lider
+            )
+
+        if not aprobado_lider:
+            await bus_mensajes.publicar_sistema(
+                proyecto_id,
+                f"[COMMIT #{commit.id[:8]}] Rechazado por el Líder. No se hará commit.",
+            )
+            return
+
+        # ── Paso 3: Commit + Push ────────────────────────────────────────────
+        await bus_mensajes.publicar_sistema(
+            proyecto_id,
+            f"[COMMIT #{commit.id[:8]}] Líder aprobó. Haciendo commit y push...",
+        )
+
+        # Obtener datos del proyecto para la rama
+        async with FabricaSession() as session:
+            repo_proyecto = RepositorioProyecto(session)
+            try:
+                proyecto = await repo_proyecto.obtener_por_id(proyecto_id)
+            except Exception:
+                await bus_mensajes.publicar_sistema(proyecto_id, "Error: proyecto no encontrado para el commit")
+                return
+
+        if not proyecto.url_repositorio or not proyecto.rama_desarrollo:
+            await bus_mensajes.publicar_sistema(
+                proyecto_id,
+                f"[COMMIT #{commit.id[:8]}] El proyecto no tiene repositorio configurado. Commit omitido.",
+            )
+            async with FabricaSession() as session:
+                await RepositorioCommitPendiente(session).actualizar_estado(
+                    commit.id, EstadoCommit.ERROR
+                )
+            return
+
+        try:
+            hash_commit = await gestor_repositorio.escribir_y_commitear(
+                proyecto_id=proyecto_id,
+                archivos=commit.archivos,
+                mensaje_commit=f"{descripcion_commit}\n\nAprobado por: QA + Líder\nCommit ID: {commit.id[:8]}",
+                rama=proyecto.rama_desarrollo,
+            )
+            async with FabricaSession() as session:
+                await RepositorioCommitPendiente(session).actualizar_estado(
+                    commit.id,
+                    EstadoCommit.COMMITEADO,
+                    hash_commit=hash_commit,
+                )
+            await bus_mensajes.publicar_sistema(
+                proyecto_id,
+                f"[COMMIT #{commit.id[:8]}] Push exitoso a `{proyecto.rama_desarrollo}` — hash: `{hash_commit[:8]}`",
+            )
+        except Exception as e:
+            async with FabricaSession() as session:
+                await RepositorioCommitPendiente(session).actualizar_estado(
+                    commit.id, EstadoCommit.ERROR
+                )
+            await bus_mensajes.publicar_sistema(
+                proyecto_id,
+                f"[COMMIT #{commit.id[:8]}] Error al hacer push: {e}",
+            )
 
     async def _guardar_y_publicar(self, mensaje: Mensaje) -> None:
         async with FabricaSession() as session:

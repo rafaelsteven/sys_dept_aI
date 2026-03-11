@@ -21,6 +21,39 @@ class Proyecto(BaseModel):
     texto_pdf: str | None = None
     archivos_pdf: list[str] = []
     archivos_imagen: list[str] = []
+    url_repositorio: str | None = None
+    rama_desarrollo: str | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class EstadoCommit(str, Enum):
+    PENDIENTE = "pendiente"
+    EN_REVISION_QA = "en_revision_qa"
+    APROBADO_QA = "aprobado_qa"
+    RECHAZADO_QA = "rechazado_qa"
+    APROBADO_LIDER = "aprobado_lider"
+    RECHAZADO_LIDER = "rechazado_lider"
+    COMMITEADO = "commiteado"
+    ERROR = "error"
+
+
+class ArchivoCommit(BaseModel):
+    ruta: str        # ruta relativa dentro del repo, ej: "src/api/usuarios.py"
+    contenido: str   # contenido completo del archivo
+
+
+class CommitPendiente(BaseModel):
+    id: str
+    proyecto_id: str
+    descripcion: str
+    archivos: list[ArchivoCommit]
+    estado: EstadoCommit = EstadoCommit.PENDIENTE
+    revision_qa: str | None = None
+    revision_lider: str | None = None
+    hash_commit: str | None = None
+    fecha_creacion: datetime
 
     class Config:
         from_attributes = True

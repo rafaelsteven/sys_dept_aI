@@ -1,5 +1,5 @@
 import { useState, useRef } from 'react'
-import { X, Upload, FileText, Image, Loader2 } from 'lucide-react'
+import { X, Upload, FileText, Image, Loader2, GitBranch } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useCrearProyecto } from '../../hooks/useProyectos'
 
@@ -12,6 +12,7 @@ export default function ModalNuevoProyecto({ abierto, onCerrar }: ModalNuevoProy
   const [nombre, setNombre] = useState('')
   const [descripcion, setDescripcion] = useState('')
   const [promptInicial, setPromptInicial] = useState('')
+  const [urlRepositorio, setUrlRepositorio] = useState('')
   const [pdfs, setPdfs] = useState<File[]>([])
   const [imagenes, setImagenes] = useState<File[]>([])
   const inputPdfRef = useRef<HTMLInputElement>(null)
@@ -28,6 +29,7 @@ export default function ModalNuevoProyecto({ abierto, onCerrar }: ModalNuevoProy
     formData.append('nombre', nombre.trim())
     formData.append('descripcion', descripcion.trim())
     formData.append('prompt_inicial', promptInicial.trim())
+    if (urlRepositorio.trim()) formData.append('url_repositorio', urlRepositorio.trim())
     pdfs.forEach((pdf) => formData.append('pdfs', pdf))
     imagenes.forEach((img) => formData.append('imagenes', img))
 
@@ -44,6 +46,7 @@ export default function ModalNuevoProyecto({ abierto, onCerrar }: ModalNuevoProy
     setNombre('')
     setDescripcion('')
     setPromptInicial('')
+    setUrlRepositorio('')
     setPdfs([])
     setImagenes([])
   }
@@ -118,6 +121,30 @@ export default function ModalNuevoProyecto({ abierto, onCerrar }: ModalNuevoProy
                 className="w-full px-3 py-2.5 rounded-lg text-sm border outline-none resize-none"
                 style={{ backgroundColor: '#1e2530', borderColor: '#2a3545', color: '#e2e8f0' }}
               />
+            </div>
+
+            {/* URL Repositorio */}
+            <div>
+              <label className="block text-sm mb-1.5 font-medium" style={{ color: '#9ca3af' }}>
+                <GitBranch size={14} className="inline mr-1.5" />
+                URL del repositorio (opcional)
+              </label>
+              <p className="text-xs mb-2" style={{ color: '#6b7280' }}>
+                El equipo clonará el repo, creará la rama <code style={{ color: '#00d4ff' }}>dev</code> y hará commit+push tras aprobación QA → Líder.
+              </p>
+              <input
+                type="url"
+                value={urlRepositorio}
+                onChange={(e) => setUrlRepositorio(e.target.value)}
+                placeholder="https://github.com/usuario/mi-proyecto.git"
+                className="w-full px-3 py-2.5 rounded-lg text-sm border outline-none font-mono"
+                style={{ backgroundColor: '#1e2530', borderColor: '#2a3545', color: '#e2e8f0' }}
+              />
+              {urlRepositorio.trim() && (
+                <p className="text-xs mt-1" style={{ color: '#00ff88' }}>
+                  El repo se clonará al crear el proyecto
+                </p>
+              )}
             </div>
 
             {/* PDFs */}
